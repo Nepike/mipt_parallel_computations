@@ -8,9 +8,10 @@
 #include <sys/msg.h>
 #include <pthread.h>
 #include <omp.h>
+#include <errno.h>
 
 #define MSG_ID 7777
-#define MSG_PERM 00666
+#define MSG_PERM 0666
 #define MAX_NI 1000000000
 
 /* Структура сообщения для IPC */
@@ -19,7 +20,6 @@ typedef struct {
     double sum;
 } msg_t;
 
-/* Параметры для потока */
 typedef struct {
     int tid;
     double a, b;
@@ -46,16 +46,19 @@ void* thread_func(void* arg) {
 }
 
 int main(int argc, char* argv[]) {
+    /* Отключаем буферизацию stderr, чтобы вывод появлялся мгновенно */
+    setbuf(stderr, NULL);
+
     int np = 1, nt = 1;
     if (argc >= 3) { np = atoi(argv[1]); nt = atoi(argv[2]); }
     if (np < 1) np = 1;
     if (nt < 1) nt = 1;
 
+    double t_start = omp_get_wtime();
+
     pid_t spid = 0;
     int mp = 0;
     int msgid = -1;
-
-    double t_start = omp_get_wtime();
 
     /* Создание тяжелых процессов */
     for (int i = 1; i < np; i++) {
@@ -63,11 +66,11 @@ int main(int argc, char* argv[]) {
             mp = i;
             spid = fork();
             if (spid < 0) { perror("fork"); exit(1); }
-            if (spid == 0) break; /* Потомок выходит из цикла */
+            if (spid == 0) break;
         }
     }
 
-    /*Распределение работы для текущего процесса */
+    /* Распределение работы */
     double h_proc = 1.0 / np;
     double a_proc = h_proc * mp;
     double b_proc = (mp == np - 1) ? 1.0 : a_proc + h_proc;
@@ -77,16 +80,18 @@ int main(int argc, char* argv[]) {
     pthread_t threads[nt];
     thread_data_t tdata[nt];
 
-    /*Создание и запуск потоков */
+    /* Создание потоков */
     for (int t = 0; t < nt; t++) {
         tdata[t].tid = t;
         tdata[t].a = a_proc + h_th * t;
         tdata[t].b = (t == nt - 1) ? b_proc : a_proc + h_th * (t + 1);
         tdata[t].n = n_th;
-        pthread_create(&threads[t], NULL, thread_func, &tdata[t]);
+        if (pthread_create(&threads[t], NULL, thread_func, &tdata[t]) != 0) {
+            perror("pthread_create"); exit(1);
+        }
     }
 
-    /* суммирование */
+    /* Ожидание потоков и суммирование */
     double proc_sum = 0.0;
     for (int t = 0; t < nt; t++) {
         pthread_join(threads[t], NULL);
@@ -95,23 +100,31 @@ int main(int argc, char* argv[]) {
                 mp, t, tdata[t].a, tdata[t].b, tdata[t].n, tdata[t].result);
     }
 
-    /* Обмен через очередь сообщений System V */
+    /*обмен через очередь сообщений System V */
     if (mp == 0) {
-        msgid = msgget(MSG_ID, MSG_PERM | IPC_CREAT);
+        msgid = msgget(MSG_ID, IPC_CREAT | MSG_PERM);
         if (msgid < 0) { perror("msgget master"); exit(1); }
+
         for (int i = 1; i < np; i++) {
             msg_t msg;
-            msgrcv(msgid, &msg, sizeof(double), 0, 0);
+            if (msgrcv(msgid, &msg, sizeof(double), 0, 0) == -1) {
+                perror("msgrcv master"); exit(1);
+            }
             proc_sum += msg.sum;
         }
         msgctl(msgid, IPC_RMID, NULL);
-    } 
-    else {
-        while ((msgid = msgget(MSG_ID, MSG_PERM)) < 0) usleep(100);
+    } else {
+        /* Ждём, пока мастер создаст очередь */
+        while ((msgid = msgget(MSG_ID, MSG_PERM)) < 0) {
+            if (errno != ENOENT) { perror("msgget slave"); exit(1); }
+            usleep(100);
+        }
         msg_t msg;
         msg.mtype = mp;
         msg.sum = proc_sum;
-        msgsnd(msgid, &msg, sizeof(double), 0);
+        if (msgsnd(msgid, &msg, sizeof(double), 0) == -1) {
+            perror("msgsnd slave"); exit(1);
+        }
     }
 
     double t_elapsed = omp_get_wtime() - t_start;
