@@ -32,10 +32,14 @@ void local_sweep(int n, double *a, double *b, double *c, double *f, double *y, d
     beta[0]  = left_val;
     for (int i = 0; i < n; i++) {
         double denom = c[i] - a[i] * alpha[i];
+        if (fabs(denom) < 1e-14) {
+            printf("Zero denom at i=%d\n", i);
+            exit(1);
+        }
         alpha[i+1] = b[i] / denom;
         beta[i+1]  = (f[i] - a[i] * beta[i]) / denom;
     }
-    y[n-1] = beta[n-1];
+    y[n-1] = beta[n];
     for (int i = n-2; i >= 0; i--) {
         y[i] = alpha[i+1] * y[i+1] + beta[i+1];
     }
@@ -61,7 +65,6 @@ int main(int argc, char** argv) {
     double *cc = calloc(nc, sizeof(double));
     double *ff = calloc(nc, sizeof(double));
 
-    /* Распараллеливаем сборку сетки и коэффициентов (независимые узлы) */
     #pragma omp parallel for
     for (int i = 0; i < nc; i++) {
         x[i] = A + (mp * nx / np + i) * hx;
@@ -74,20 +77,19 @@ int main(int argc, char** argv) {
         ff[i] = hx * hx * f_rhs(xi);
     }
 
-    /* Граничные условия */
     if (mp == 0) {
         cc[0] = 1.0; aa[0] = 0.0; bb[0] = 0.0; ff[0] = U_A;
     }
     if (mp == np - 1) {
         double k_B = k(B);
         cc[nc-1] -= bb[nc-1];
-        ff[nc-1] += hx * k_B * U_B; /* Исправлено: + соответствует u'(b)=U_B */
+        ff[nc-1] += hx * k_B * U_B;
         bb[nc-1] = 0.0;
     }
 
     double t_start = MPI_Wtime();
     double *y1 = malloc(nc * sizeof(double));
-    local_sweep(nc, aa, bb, cc, ff, y1, 0.0);
+    local_sweep(nc, aa, bb, cc, ff, y1, U_A);
 
     double *y2 = NULL, *y3 = NULL, *y = NULL;
 
@@ -95,27 +97,23 @@ int main(int argc, char** argv) {
         y2 = malloc(nc * sizeof(double));
         y3 = malloc(nc * sizeof(double));
 
-        /* Сохраняем коэффициенты для восстановления после модификаций */
         double *aa0 = malloc(nc * sizeof(double));
         double *bb0 = malloc(nc * sizeof(double));
         double *cc0 = malloc(nc * sizeof(double));
         double *ff0 = malloc(nc * sizeof(double));
         for(int i=0; i<nc; i++) { aa0[i]=aa[i]; bb0[i]=bb[i]; cc0[i]=cc[i]; ff0[i]=ff[i]; }
 
-        /* Базис y2: влияние левой границы подрегиона */
         if (mp == 0) { cc[0]=1.0; aa[0]=0.0; bb[0]=0.0; ff[0]=1.0; }
         else { ff[0]=0.0; aa[0]=bb[0]=0.0; cc[0]=1.0; }
         if (mp == np-1) { cc[nc-1]-=bb[nc-1]; ff[nc-1]=0.0; bb[nc-1]=0.0; }
         local_sweep(nc, aa, bb, cc, ff, y2, 0.0);
 
-        /* Базис y3: влияние правой границы подрегиона */
         for(int i=0; i<nc; i++) { aa[i]=aa0[i]; bb[i]=bb0[i]; cc[i]=cc0[i]; ff[i]=ff0[i]; }
         if (mp == 0) { cc[0]=1.0; aa[0]=0.0; bb[0]=0.0; ff[0]=0.0; }
         else { ff[0]=0.0; aa[0]=bb[0]=0.0; cc[0]=1.0; }
         if (mp == np-1) { cc[nc-1]=1.0; aa[nc-1]=0.0; bb[nc-1]=0.0; ff[nc-1]=1.0; }
         local_sweep(nc, aa, bb, cc, ff, y3, 0.0);
 
-        /* Восстанавливаем исходные коэффициенты */
         for(int i=0; i<nc; i++) { aa[i]=aa0[i]; bb[i]=bb0[i]; cc[i]=cc0[i]; ff[i]=ff0[i]; }
         if (mp == 0) { cc[0]=1.0; aa[0]=0.0; bb[0]=0.0; ff[0]=U_A; }
         if (mp == np - 1) {
@@ -125,15 +123,13 @@ int main(int argc, char** argv) {
         }
         free(aa0); free(bb0); free(cc0); free(ff0);
 
-        /* Формирование короткой системы */
         int n_short = 2 * (np - 1);
         int n_coeffs = 4 * n_short;
         double *d_short = calloc(n_coeffs, sizeof(double));
         double *e_short = calloc(n_coeffs, sizeof(double));
 
-        /* Индексация: каждый процесс вносит по 4 коэффициента на каждую границу */
-        int base_left  = 4 * (mp - 1); /* интерфейс слева */
-        int base_right = 4 * mp;       /* интерфейс справа */
+        int base_left  = 4 * (mp - 1);
+        int base_right = 4 * mp;
 
         if (mp > 0) {
             d_short[base_left]   = aa[0]*y2[1] - cc[0];
@@ -152,7 +148,6 @@ int main(int argc, char** argv) {
         MPI_Allreduce(d_short, e_short, n_coeffs, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
         double t_comm = MPI_Wtime() - t_comm_start;
 
-        /* Распаковка и решение короткой системы */
         double *a_s = malloc(n_short * sizeof(double));
         double *b_s = malloc(n_short * sizeof(double));
         double *c_s = malloc(n_short * sizeof(double));
@@ -169,7 +164,6 @@ int main(int argc, char** argv) {
         b_s[n_short-1] = 0.0;
         local_sweep(n_short, a_s, b_s, c_s, f_s, y_s, 0.0);
 
-        /* Восстановление полного решения */
         y = malloc(nc * sizeof(double));
         if (mp == 0) {
             double c1 = y_s[0];
@@ -194,7 +188,6 @@ int main(int argc, char** argv) {
         for (int i = 0; i < nc; i++) y[i] = y1[i];
     }
 
-    /* Оценка погрешности */
     double dmax = 0.0;
     #pragma omp parallel for reduction(max:dmax)
     for (int i = 0; i < nc; i++) {
