@@ -9,7 +9,9 @@
 #include "mymask.h"
 #include "myprog.h"
 
+#ifndef M_PI
 #define M_PI 3.14159265358979323846
+#endif
 
 int np, mp, nl, ier, lp;
 char pname[MPI_MAX_PROCESSOR_NAME];
@@ -30,10 +32,11 @@ double u2(double x) { return -px2 * cos(px * (x - xa)); }
 
 double k(double x)  { return 1.0 + exp(5.0 * (x - xa) / (xb - xa)); }
 double q(double x)  { return 1.0 - 0.5 * sin(8.0 * M_PI * (x - xa) / (xb - xa)); }
-/* f(x) вычисляется подстановкой u(x) в исходное уравнение */
+
+/* f(x) из уравнения (k*u')' - q*u = -f  =>  f = q*u - (k*u')' = q*u - k'*u' - k*u'' */
 double f(double x)  { 
-    double dk = (5.0/(xb-xa)) * exp(5.0*(x-xa)/(xb-xa));
-    return q(x)*u(x) + dk*u1(x) + k(x)*u2(x); 
+    double dk = (5.0 / (xb - xa)) * exp(5.0 * (x - xa) / (xb - xa));
+    return q(x) * u(x) - dk * u1(x) - k(x) * u2(x); 
 }
 
 int main(int argc, char *argv[]) {
