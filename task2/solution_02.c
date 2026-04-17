@@ -38,7 +38,7 @@ void* thread_func(void* arg) {
 }
 
 int main(int argc, char* argv[]) {
-    setbuf(stderr, NULL); // Отключаем буферизацию stderr
+    setbuf(stderr, NULL); // Мгновенный вывод без буферизации
 
     int np = 1, nt = 1;
     if (argc >= 3) { np = atoi(argv[1]); nt = atoi(argv[2]); }
@@ -47,24 +47,24 @@ int main(int argc, char* argv[]) {
 
     double t_start = omp_get_wtime();
 
-    /* Все процессы получат один и тот же msgid */
+    // Очередь создается ДО ветвления, чтобы все процессы получили один msgid
     int msgid = msgget(MSG_ID, IPC_CREAT | MSG_PERM);
     if (msgid < 0) { perror("msgget"); exit(1); }
 
-    pid_t spid = 0;
     int mp = 0;
+    pid_t spid;
 
-    /* Ветвление на тяжелые процессы */
+    // создание np-1 дочерних процессов
     for (int i = 1; i < np; i++) {
+        spid = fork();
+        if (spid < 0) { perror("fork"); exit(1); }
         if (spid == 0) {
             mp = i;
-            spid = fork();
-            if (spid < 0) { perror("fork"); exit(1); }
-            if (spid == 0) break;
+            break;
         }
     }
 
-    /* Распределение области интегрирования */
+    // Распределение области интегрирования
     double h_proc = 1.0 / np;
     double a_proc = h_proc * mp;
     double b_proc = (mp == np - 1) ? 1.0 : a_proc + h_proc;
@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
     pthread_t threads[nt];
     thread_data_t tdata[nt];
 
-    /* 3. Создание потоков */
+    // Создание и запуск потоков
     for (int t = 0; t < nt; t++) {
         tdata[t].tid = t;
         tdata[t].a = a_proc + h_th * t;
@@ -83,7 +83,7 @@ int main(int argc, char* argv[]) {
         pthread_create(&threads[t], NULL, thread_func, &tdata[t]);
     }
 
-    /* Ожидание потоков и локальная сумма */
+    // Суммирование
     double proc_sum = 0.0;
     for (int t = 0; t < nt; t++) {
         pthread_join(threads[t], NULL);
@@ -92,7 +92,7 @@ int main(int argc, char* argv[]) {
                 mp, t, tdata[t].a, tdata[t].b, tdata[t].n, tdata[t].result);
     }
 
-    /* Суммирование */
+    //  Обмен через очередь сообщений System V 
     if (mp == 0) {
         for (int i = 1; i < np; i++) {
             msg_t msg;
