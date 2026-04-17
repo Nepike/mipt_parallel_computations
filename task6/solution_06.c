@@ -4,7 +4,7 @@
 #include <mpi.h>
 #include <time.h>
 
-/* Компаратор для qsort: возвращает -1, 0 или 1 без риска переполнения */
+/* компаратор для qsort: возвращает -1, 0 или 1 без риска переполнения */
 int cmp_double(const void *a, const void *b) {
     double da = *(const double*)a;
     double db = *(const double*)b;
@@ -20,12 +20,12 @@ int main(int argc, char *argv[]) {
     int ns = (argc > 1) ? atoi(argv[1]) : 10000;
     if (ns < np) ns = np;
 
-    /* Равномерное распределение: остаток отдается последнему процессу */
+    /* Равномерное распределение */
     int base_nc = ns / np;
     int rem = ns % np;
     int nc = base_nc + (mp == np - 1 ? rem : 0);
 
-    /* Выделение локального буфера */
+    /* буфер */
     double *a1 = (double*)malloc(nc * sizeof(double));
     if (!a1) { perror("malloc"); MPI_Abort(MPI_COMM_WORLD, 1); }
 
