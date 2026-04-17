@@ -14,17 +14,23 @@
 #define SEM_ID 2007
 #define PERMS 0600
 
+/* Структура для общей памяти: сумма и счётчик готовых процессов */
 typedef struct { double sum; int ready; } shared_t;
+
+/* Параметры для потока */
 typedef struct { int mp, mt, nt, n; double a, b, res; pthread_mutex_t *mut; double *psum; } tdata_t;
 
+// Интегрируемая функция
 double f(double x) { return 4.0 / (1.0 + x * x); }
 
+/* Метод средних прямоугольников */
 double integrate(double (*func)(double), double a, double b, int n) {
     double h = (b - a) / n, s = 0.0;
     for (int i = 0; i < n; i++) s += func(a + h * (i + 0.5));
     return h * s;
 }
 
+// my_job
 void* thread_func(void* arg) {
     tdata_t* td = (tdata_t*)arg;
     double h = (td->b - td->a) / td->nt;
@@ -55,7 +61,7 @@ int main(int argc, char* argv[]) {
     double proc_sum = 0.0;
     pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
 
-    /* 1. Создание IPC-ресурсов ДО ветвления */
+    /* Создание IPC-ресурсов до ветвления */
     int shmid = shmget(SHM_ID, sizeof(shared_t), PERMS | IPC_CREAT);
     int semid = semget(SEM_ID, 1, PERMS | IPC_CREAT);
     if (shmid < 0 || semid < 0) { perror("shm/sem get"); exit(1); }
@@ -67,20 +73,20 @@ int main(int argc, char* argv[]) {
     semctl(semid, 0, SETVAL, arg);
     if (mp == 0) { shm->sum = 0.0; shm->ready = 0; }
 
-    /* 2. Создание тяжелых процессов */
+    /* Создание тяжелых процессов */
     for (int i = 1; i < np; i++) {
         spid = fork();
         if (spid < 0) { perror("fork"); exit(1); }
         if (spid == 0) { mp = i; break; }
     }
 
-    /* 3. Распределение работы */
+    /* Распределение работы */
     double h_proc = 1.0 / np;
     double a_proc = h_proc * mp;
     double b_proc = (mp == np - 1) ? 1.0 : a_proc + h_proc;
-    int n1 = 1000000000 / (np * nt); /* Честное деление общего объема */
+    int n1 = 1000000000 / (np * nt);
 
-    /* 4. Создание легких процессов (потоков) */
+    /* Создание потоков */
     pthread_t* threads = malloc(nt * sizeof(pthread_t));
     tdata_t* targs = malloc(nt * sizeof(tdata_t));
     for (int t = 0; t < nt; t++) {
@@ -90,14 +96,14 @@ int main(int argc, char* argv[]) {
     for (int t = 0; t < nt; t++) pthread_join(threads[t], NULL);
     free(threads); free(targs);
 
-    /* 5. Агрегация результатов через семафор */
+    /* Агрегация через семафор */
     struct sembuf lock = {0, -1, 0}, unlock = {0, +1, 0};
     semop(semid, &lock, 1);
     shm->sum += proc_sum;
     shm->ready++;
     semop(semid, &unlock, 1);
 
-    /* 6. Мастер ждет завершения и выводит результат */
+    /* Мастер ждет завершения и выводит результат */
     if (mp == 0) {
         while (shm->ready < np) usleep(100);
         double t_elapsed = omp_get_wtime() - t_start;
@@ -108,7 +114,7 @@ int main(int argc, char* argv[]) {
         semctl(SEM_ID, 0, IPC_RMID);
     } else {
         shmdt(shm);
-        exit(0); /* Дети выходят сразу, не выполняя код мастера */
+        exit(0);
     }
     return 0;
 }
